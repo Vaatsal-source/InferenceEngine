@@ -1,0 +1,35 @@
+# Build output (any out-of-source build dir, not just "build/")
+build*/
+out/
+cmake-build-*/
+
+# Compiled objects / binaries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.pdb
+*.ilk
+
+# CMake generated files that shouldn't live outside a build dir
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+compile_commands.json
+*.ninja
+.ninja_log
+
+# Editor / IDE
+.vscode/
+.vs/
+.cache/
+*.swp
+
+# OS cruft
+.DS_Store
+Thumbs.db
