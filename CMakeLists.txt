@@ -19,6 +19,7 @@ add_compile_options(-Wall -Wextra)
 add_library(tinygrad
   src/value.cpp
   src/tensor.cpp
+  src/tensor_grad.cpp
 )
 target_include_directories(tinygrad PUBLIC include)
 
