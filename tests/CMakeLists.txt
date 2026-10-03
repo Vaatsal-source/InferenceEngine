@@ -2,6 +2,7 @@ add_executable(tinygrad_tests
   test_value.cpp
   test_tensor.cpp
   test_tensor_grad.cpp
+  test_conv.cpp
 )
 target_link_libraries(tinygrad_tests PRIVATE tinygrad GTest::gtest_main)
 target_include_directories(tinygrad_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)

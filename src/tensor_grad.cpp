@@ -10,6 +10,36 @@ namespace {
     throw std::logic_error(std::string("tinygrad::GradTensor::") + fn +
                             " is not implemented yet — see include/tinygrad/tensor_grad.hpp for the spec");
 }
+
+// Sums `grad` (shaped like a broadcast op's output) back down to
+// `target_shape` (one of that op's original input shapes). Mirror image of
+// Phase 2's map_to_source_index: instead of reading the same source value
+// for every stretched position, we accumulate every stretched position's
+// gradient into that one shared source position.
+Tensor unbroadcast(const Tensor& grad, const std::vector<size_t>& target_shape) {
+    if (grad.shape() == target_shape) return grad;
+
+    Tensor result(target_shape);  // zero-filled
+    size_t total = grad.numel();
+    const std::vector<size_t>& grad_shape = grad.shape();
+    std::vector<size_t> idx(grad_shape.size(), 0);
+    size_t skip = grad_shape.size() - target_shape.size();
+
+    for (size_t linear = 0; linear < total; ++linear) {
+        size_t rem = linear;
+        for (size_t d = grad_shape.size(); d-- > 0;) {
+            idx[d] = rem % grad_shape[d];
+            rem /= grad_shape[d];
+        }
+
+        std::vector<size_t> target_idx(target_shape.size());
+        for (size_t d = 0; d < target_shape.size(); ++d) {
+            target_idx[d] = (target_shape[d] == 1) ? 0 : idx[skip + d];
+        }
+        result.at(target_idx) += grad.at(idx);
+    }
+    return result;
+}
 }  // namespace
 
 // --- trivial plumbing (already done for you) --------------------------
@@ -131,25 +161,93 @@ const Tensor& GradTensor::grad() const { return node_->grad; }
 // where ^T is Tensor::transpose(0, 1) from Phase 2. No broadcasting or
 // unbroadcasting needed here — matmul doesn't broadcast in this engine.
 
-void GradTensor::backward() { not_implemented("backward"); }
+void GradTensor::backward() { 
+    std::vector<std::shared_ptr<TensorNode>> topo_order;
+    std::unordered_set<TensorNode*> visited;
+    //post order dfs , node only added to topo_order after all of its parents 
+    std::function<void(const std::shared_ptr<TensorNode>&)> build_topo = [&](const std::shared_ptr<TensorNode>& n) {
+        if (visited.count(n.get())) return;
+        visited.insert(n.get());
+        for (const auto& parent : n->prev) {
+            build_topo(parent);
+        }
+        topo_order.push_back(n);
+    };
+    build_topo(node_);
+    if (node_->data.numel() != 1) {
+        throw std::runtime_error("GradTensor::backward: can only be called on a scalar (single-element) tensor — call sum() first");
+    }
+    node_->grad = Tensor(node_->data.shape(), std::vector<double>(node_->data.numel(), 1.0));
+    for (auto it = topo_order.rbegin(); it != topo_order.rend(); ++it) {
+        (*it)->backward_fn();
+    }
+}
 
 GradTensor operator+(const GradTensor& a, const GradTensor& b) {
-    (void)a;
-    (void)b;
-    not_implemented("operator+");
+    auto out = std::make_shared<TensorNode>(a.data() + b.data());
+    out->prev = {a.node(), b.node()};
+    out->op = "+";
+    std::weak_ptr<TensorNode> out_weak = out;
+    auto a_node = a.node();
+    auto b_node = b.node();
+    out->backward_fn = [out_weak, a_node, b_node] {
+        auto out_locked = out_weak.lock();
+        a_node->grad = a_node->grad + unbroadcast(out_locked->grad, a_node->data.shape());
+        b_node->grad = b_node->grad + unbroadcast(out_locked->grad, b_node->data.shape());
+    };
+    return GradTensor(out);
 }
 
 GradTensor operator*(const GradTensor& a, const GradTensor& b) {
-    (void)a;
-    (void)b;
-    not_implemented("operator*");
+    auto out = std::make_shared<TensorNode>(a.data() * b.data());
+    out->prev = {a.node(), b.node()};
+    out->op = "*";
+    std::weak_ptr<TensorNode> out_weak = out;
+    auto a_node = a.node();
+    auto b_node = b.node();
+    out->backward_fn = [out_weak, a_node, b_node] {
+        auto out_locked = out_weak.lock();
+        a_node->grad = a_node->grad + unbroadcast(b_node->data * out_locked->grad, a_node->data.shape());
+        b_node->grad = b_node->grad + unbroadcast(a_node->data * out_locked->grad, b_node->data.shape());
+    };
+    return GradTensor(out);
 }
 
-GradTensor GradTensor::sum() const { not_implemented("sum"); }
+GradTensor GradTensor::sum() const { 
+    Tensor total({1});
+    double sum_value = 0.0;
+    for (const auto& val : data().to_vector()) {
+        sum_value += val;
+    }
+    total.at({0}) = sum_value;
+
+    auto out = std::make_shared<TensorNode>(total);
+    out->prev = {node_};
+    out->op = "sum";
+    std::weak_ptr<TensorNode> out_weak = out;
+    auto self_node = node_;
+    out->backward_fn = [out_weak, self_node] {
+        auto out_locked = out_weak.lock();
+        double g = out_locked->grad.at({0});
+        self_node->grad = self_node->grad + Tensor(self_node->data.shape(), std::vector<double>(self_node->data.numel(), g));
+    };
+    return GradTensor(out);
+}
 
 GradTensor GradTensor::matmul(const GradTensor& other) const {
-    (void)other;
-    not_implemented("matmul");
+    Tensor out_data = data().matmul(other.data());
+    auto out = std::make_shared<TensorNode>(out_data);
+    out->prev = {node_, other.node()};
+    out->op = "matmul";
+    std::weak_ptr<TensorNode> out_weak = out;
+    auto a_node = node_;
+    auto b_node = other.node();
+    out->backward_fn = [out_weak, a_node, b_node] {
+        auto out_locked = out_weak.lock();
+        a_node->grad = a_node->grad + out_locked->grad.matmul(b_node->data.transpose(0, 1));
+        b_node->grad = b_node->grad + a_node->data.transpose(0, 1).matmul(out_locked->grad);
+    };
+    return GradTensor(out);
 }
 
 }  // namespace tinygrad

@@ -20,6 +20,7 @@ add_library(tinygrad
   src/value.cpp
   src/tensor.cpp
   src/tensor_grad.cpp
+  src/conv.cpp
 )
 target_include_directories(tinygrad PUBLIC include)
 
