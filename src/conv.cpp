@@ -114,11 +114,68 @@ Tensor crop2d(const Tensor& padded, size_t padding) {
 // conceivably be the argmax for more than one output window.
 
 GradTensor conv2d(const GradTensor& input, const GradTensor& weight, size_t stride, size_t padding) {
-    (void)input;
-    (void)weight;
-    (void)stride;
-    (void)padding;
-    not_implemented("conv2d");
+    if(input.data().shape()[1] != weight.data().shape()[1]) {
+        throw std::invalid_argument("conv2d: input channels (C_in) must match weight channels (C_in)");
+    }
+    Tensor padded = pad2d(input.data(), padding);
+    const auto& s = padded.shape();
+    const auto& w_s = weight.data().shape();
+    size_t H_out = (s[2] - w_s[2]) / stride + 1;
+    size_t W_out = (s[3] - w_s[3]) / stride + 1;
+    if ((s[2] - w_s[2]) % stride != 0 || (s[3] - w_s[3]) % stride != 0) {
+        throw std::invalid_argument("conv2d: output dimensions must be integers");
+    }
+    Tensor out_data({s[0], w_s[0], H_out, W_out});  // zero-filled accumulator
+    for (size_t n = 0; n < s[0]; ++n) {
+        for (size_t co = 0; co < w_s[0]; ++co) {
+            for (size_t oh = 0; oh < H_out; ++oh) {
+                for (size_t ow = 0; ow < W_out; ++ow) {
+                    for (size_t ci = 0; ci < s[1]; ++ci) {
+                        for (size_t kh = 0; kh < w_s[2]; ++kh) {
+                            for (size_t kw = 0; kw < w_s[3]; ++kw) {
+                                out_data.at({n, co, oh, ow}) += padded.at({n, ci, oh * stride + kh, ow * stride + kw}) * weight.data().at({co, ci, kh, kw});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    auto out_node = std::make_shared<TensorNode>(out_data);
+    out_node->prev = {input.node(), weight.node()};
+    out_node->op = "conv2d";
+    std::weak_ptr<TensorNode> out_weak = out_node;
+    auto input_node = input.node();
+    auto weight_node = weight.node();
+    out_node->backward_fn = [out_weak, input_node, weight_node, stride, padding] {
+        auto out_locked = out_weak.lock();
+        Tensor padded_input = pad2d(input_node->data, padding);
+        Tensor dL_dPaddedInput(padded_input.shape());  // zero-filled
+        Tensor dL_dWeight(weight_node->data.shape());  // zero-filled
+        const auto& s = padded_input.shape();
+        const auto& w_s = weight_node->data.shape();
+        size_t H_out = out_locked->data.shape()[2];
+        size_t W_out = out_locked->data.shape()[3];
+        for (size_t n = 0; n < s[0]; ++n) {
+            for (size_t co = 0; co < w_s[0]; ++co) {
+                for (size_t oh = 0; oh < H_out; ++oh) {
+                    for (size_t ow = 0; ow < W_out; ++ow) {
+                        for (size_t ci = 0; ci < s[1]; ++ci) {
+                            for (size_t kh = 0; kh < w_s[2]; ++kh) {
+                                for (size_t kw = 0; kw < w_s[3]; ++kw) {
+                                    dL_dWeight.at({co, ci, kh, kw}) += out_locked->grad.at({n, co, oh, ow}) * padded_input.at({n, ci, oh * stride + kh, ow * stride + kw});
+                                    dL_dPaddedInput.at({n, ci, oh * stride + kh, ow * stride + kw}) += out_locked->grad.at({n, co, oh, ow}) * weight_node->data.at({co, ci, kh, kw});
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        input_node->grad = input_node->grad + crop2d(dL_dPaddedInput, padding);
+        weight_node->grad = weight_node->grad + dL_dWeight;
+    };
+    return GradTensor(out_node);
 }
 
 GradTensor max_pool2d(const GradTensor& input, size_t kernel_size, size_t stride) {
