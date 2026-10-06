@@ -179,10 +179,7 @@ GradTensor conv2d(const GradTensor& input, const GradTensor& weight, size_t stri
 }
 
 GradTensor max_pool2d(const GradTensor& input, size_t kernel_size, size_t stride) {
-    (void)input;
-    (void)kernel_size;
-    (void)stride;
-    not_implemented("max_pool2d");
+    
 }
 
 }  // namespace tinygrad
