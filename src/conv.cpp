@@ -1,5 +1,6 @@
 #include "tinygrad/conv.hpp"
 
+#include <limits>
 #include <stdexcept>
 
 namespace tinygrad {
@@ -179,7 +180,68 @@ GradTensor conv2d(const GradTensor& input, const GradTensor& weight, size_t stri
 }
 
 GradTensor max_pool2d(const GradTensor& input, size_t kernel_size, size_t stride) {
-    
+    const auto& s = input.data().shape();  // {N, C, H, W}
+    if ((s[2] - kernel_size) % stride != 0 || (s[3] - kernel_size) % stride != 0) {
+        throw std::invalid_argument("max_pool2d: output dimensions must be integers");
+    }
+    size_t H_out = (s[2] - kernel_size) / stride + 1;
+    size_t W_out = (s[3] - kernel_size) / stride + 1;
+
+    Tensor out_data({s[0], s[1], H_out, W_out});
+    // Argmax position (kh, kw) within its window, flattened as kh*kernel_size+kw,
+    // one per output element, in the same row-major order to_vector() uses —
+    // captured below so backward_fn doesn't need to re-scan for the max.
+    std::vector<size_t> argmax(out_data.numel());
+    size_t flat = 0;
+    for (size_t n = 0; n < s[0]; ++n) {
+        for (size_t c = 0; c < s[1]; ++c) {
+            for (size_t oh = 0; oh < H_out; ++oh) {
+                for (size_t ow = 0; ow < W_out; ++ow) {
+                    double max_val = -std::numeric_limits<double>::infinity();
+                    size_t max_kh = 0, max_kw = 0;
+                    for (size_t kh = 0; kh < kernel_size; ++kh) {
+                        for (size_t kw = 0; kw < kernel_size; ++kw) {
+                            double val = input.data().at({n, c, oh * stride + kh, ow * stride + kw});
+                            if (val > max_val) {
+                                max_val = val;
+                                max_kh = kh;
+                                max_kw = kw;
+                            }
+                        }
+                    }
+                    out_data.at({n, c, oh, ow}) = max_val;
+                    argmax[flat++] = max_kh * kernel_size + max_kw;
+                }
+            }
+        }
+    }
+
+    auto out_node = std::make_shared<TensorNode>(out_data);
+    out_node->prev = {input.node()};
+    out_node->op = "max_pool2d";
+    std::weak_ptr<TensorNode> out_weak = out_node;
+    auto input_node = input.node();
+    out_node->backward_fn = [out_weak, input_node, kernel_size, stride, argmax, H_out, W_out] {
+        auto out_locked = out_weak.lock();
+        Tensor dL_dInput(input_node->data.shape());  // zero-filled
+        const auto& in_s = input_node->data.shape();
+        size_t flat = 0;
+        for (size_t n = 0; n < in_s[0]; ++n) {
+            for (size_t c = 0; c < in_s[1]; ++c) {
+                for (size_t oh = 0; oh < H_out; ++oh) {
+                    for (size_t ow = 0; ow < W_out; ++ow) {
+                        size_t max_kh = argmax[flat] / kernel_size;
+                        size_t max_kw = argmax[flat] % kernel_size;
+                        ++flat;
+                        dL_dInput.at({n, c, oh * stride + max_kh, ow * stride + max_kw}) +=
+                            out_locked->grad.at({n, c, oh, ow});
+                    }
+                }
+            }
+        }
+        input_node->grad = input_node->grad + dL_dInput;
+    };
+    return GradTensor(out_node);
 }
 
 }  // namespace tinygrad
