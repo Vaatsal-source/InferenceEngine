@@ -21,6 +21,7 @@ add_library(tinygrad
   src/tensor.cpp
   src/tensor_grad.cpp
   src/conv.cpp
+  src/nn.cpp
 )
 target_include_directories(tinygrad PUBLIC include)
 
@@ -43,3 +44,4 @@ endif()
 
 enable_testing()
 add_subdirectory(tests)
+add_subdirectory(examples)
